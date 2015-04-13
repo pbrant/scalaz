@@ -136,13 +136,17 @@ object IO extends IOInstances with IOFunctions {
     io(rw => return_(rw -> a))
 }
 
-sealed abstract class IOInstances1 {
+sealed abstract class IOInstances2 {
   implicit def IOSemigroup[A](implicit A: Semigroup[A]): Semigroup[IO[A]] =
       Semigroup.liftSemigroup[IO, A](IO.ioMonad, A)
 
   implicit val iOLiftIO: LiftIO[IO] = new IOLiftIO {}
 
   implicit val ioMonad: Monad[IO] = new IOMonad {}
+}
+
+sealed abstract class IOInstances1 extends IOInstances2 {
+  implicit val ioMonadControlIO: MonadControlIO[IO] = new IOMonadControlIO with IOLiftControlIO with IOMonad
 }
 
 sealed abstract class IOInstances0 extends IOInstances1 {
@@ -176,6 +180,13 @@ private trait IOLiftIO extends LiftIO[IO] {
 private trait IOMonadCatchIO extends MonadCatchIO[IO] {
   def except[A](io: IO[A])(h: Throwable => IO[A]): IO[A] = io.except(h)
 }
+
+private trait IOLiftControlIO extends LiftControlIO[IO] {
+  def liftControlIO[A](f: IO.RunInBase[IO,IO] => IO[A]): IO[A] =
+    IO.idLiftControl(f)
+}
+
+private trait IOMonadControlIO extends MonadControlIO[IO]
 
 /** IO Actions for writing to standard output and and reading from standard input */
 trait IOStd {
@@ -264,16 +275,24 @@ trait IOFunctions extends IOStd {
    * The Forall quantifier prevents resources from being returned by this function.
    */
   def runRegionT[P[_] : MonadControlIO, A](r: Forall[({type λ[S] = RegionT[S, P, A]})#λ]): P[A] = {
-    def after(hsIORef: IORef[List[RefCountedFinalizer]]) = for {
+    newIORef(List[RefCountedFinalizer]()).bracketIO(finalizeRegion)(s => r.apply.value.run(s))
+  }
+
+  def finalizeRegion(hsIORef: IORef[List[RefCountedFinalizer]]): IO[Unit] = {
+    import scalaz.syntax.traverse._
+    import scalaz.std.list._
+
+    for {
       hs <- hsIORef.read
-      _ <- hs.foldRight[IO[Unit]](IO.ioUnit) {
-        case (r, o) => for {
-          refCnt <- r.refcount.mod(_ - 1)
-          _ <- if (refCnt == 0) r.finalizer else IO.ioUnit
-        } yield ()
-      }
+      _ <- hs.traverse[IO, Unit](r => for {
+        refCnt <- r.refcount.mod(_ - 1)
+        _ <- if (refCnt == 0) r.finalizer else IO.ioUnit
+      } yield ())
     } yield ()
-    newIORef(List[RefCountedFinalizer]()).bracketIO(after)(s => r.apply.value.run(s))
+  }
+
+  def runIORegion[A](r: Forall[({type λ[S] = RegionT[S, IO, A]})#λ]): IO[A] = {
+    newIORef(List[RefCountedFinalizer]()).bracket(finalizeRegion)(s => r.apply.value.run(s))
   }
 
   /** An IO action is an ST action. */

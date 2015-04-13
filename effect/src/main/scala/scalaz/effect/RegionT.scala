@@ -18,6 +18,12 @@ sealed trait RegionT[S, P[_], A] {
 
   def runT(r: IORef[List[RefCountedFinalizer]]): P[A] =
     value.run(r)
+
+  def flatMap[B](f: A => RegionT[S, P, B])(implicit M: Monad[P]): RegionT[S, P, B] =
+    RegionT(kleisli(s => M.bind(this.value.run(s))((a: A) => f(a).value.run(s))))
+
+  def map[B](f: A => B)(implicit F: Functor[P]): RegionT[S, P, B] =
+    RegionT(kleisli(s => F.map(this.value.run(s))(f)))
 }
 
 object RegionT extends RegionTInstances with RegionTFunctions {
@@ -48,12 +54,14 @@ trait RegionTMonad[S, M[_]] extends Monad[({type λ[α] = RegionT[S, M, α]})#λ
 
   def point[A](a: => A): RegionT[S, M, A] = RegionT(kleisli(s => M.point(a)))
   def bind[A, B](fa: RegionT[S, M, A])(f: A => RegionT[S, M, B]): RegionT[S, M, B] =
-    RegionT(kleisli(s => M.bind(fa.value.run(s))((a: A) => f(a).value.run(s))))
+    fa flatMap f
+  override def map[A, B](fa: RegionT[S, M, A])(f: A => B): RegionT[S, M, B] =
+    fa map f
 }
 
 trait RegionTLiftIO[S, M[_]] extends LiftIO[({type λ[α] = RegionT[S, M, α]})#λ] {
   implicit def L: LiftIO[M]
-  
+
   def liftIO[A](ioa: IO[A]) = RegionT.regionT(kleisli(_ => L.liftIO(ioa)))
 }
 
